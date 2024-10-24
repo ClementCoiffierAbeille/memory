@@ -1,0 +1,85 @@
+name: CI Workflow
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  test-memory:
+    runs-on: [self-hosted]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Find and test JPEG files
+        run: |
+          # Remplacer les fichiers corrompus
+          for file in $(find . -name "*.jpg"); do
+            if ! file "$file" | grep -q "JPEG image data"; then
+              echo "File $file is corrupted. Replacing it."
+              cp /Users/clementcoiffierabeille/memory/imgBackup/backup.jpg "$file"  # Chemin vers un JPEG de remplacement
+            fi
+          done
+
+  build-memory:
+    runs-on: [self-hosted]
+    needs: test-memory
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/memory .
+
+  push-memory:
+    needs: build-memory
+    runs-on: [self-hosted]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Push Docker image to DockerHub
+        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/memory
+
+  deploy-memory:
+    needs: push-memory
+    runs-on: [self-hosted]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Connexion SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.SSH_USERNAME }}@127.0.0.1 << EOF
+            # Connexion à Docker sans utiliser le trousseau de clés
+            mkdir -p ~/.docker
+            echo '{"credHelpers": {}}' > ~/.docker/config.json
+            
+            echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+            # Vérifiez si le conteneur existe avant de tenter de l'arrêter ou de le supprimer
+            if [ "$(docker ps -q -f name=nginx-memory)" ]; then
+                docker-compose down
+            fi
+
+            # Assurez-vous que le port 80 est libre
+            if ! nc -z 127.0.0.1 80; then
+                docker-compose up -d
+            else
+                echo "Le port 80 est déjà utilisé. Veuillez libérer le port avant de lancer le conteneur."
+            fi
+          EOF
+
